@@ -103,6 +103,8 @@ public:
 	 */
 	ssize_t write(cdev::file_t *filp, const char *buffer, size_t buflen) override;
 
+	bool write(uint8_t *buffer);
+
 	/**
 	 * IOCTL control for the subscriber.
 	 */

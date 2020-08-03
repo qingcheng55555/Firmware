@@ -203,8 +203,8 @@ uORB::DeviceNode::read(cdev::file_t *filp, char *buffer, size_t buflen)
 	return _meta->o_size;
 }
 
-ssize_t
-uORB::DeviceNode::write(cdev::file_t *filp, const char *buffer, size_t buflen)
+bool
+uORB::DeviceNode::write(uint8_t *buffer)
 {
 	/*
 	 * Writes are legal from interrupt context as long as the
@@ -238,33 +238,44 @@ uORB::DeviceNode::write(cdev::file_t *filp, const char *buffer, size_t buflen)
 
 		/* failed or could not allocate */
 		if (nullptr == _data) {
-			return -ENOMEM;
+			return false;
 		}
 	}
 
-	/* If write size does not match, that is an error */
-	if (_meta->o_size != buflen) {
-		return -EIO;
+	if (!buffer) {
+		return false;
 	}
 
-	/* Perform an atomic copy. */
+	// Perform an atomic copy.
 	ATOMIC_ENTER;
 	/* wrap-around happens after ~49 days, assuming a publisher rate of 1 kHz */
 	unsigned generation = _generation.fetch_add(1);
 
+	hrt_abstime *timestamp = (hrt_abstime *)buffer;
+	*timestamp = hrt_absolute_time();
+
 	memcpy(_data + (_meta->o_size * (generation % _queue_size)), buffer, _meta->o_size);
+	ATOMIC_LEAVE;
 
 	// callbacks
-	for (auto item : _callbacks) {
+	for (auto *item : _callbacks) {
 		item->call();
 	}
-
-	ATOMIC_LEAVE;
 
 	/* notify any poll waiters */
 	poll_notify(POLLIN);
 
-	return _meta->o_size;
+	return true;
+}
+
+ssize_t
+uORB::DeviceNode::write(cdev::file_t *filp, const char *buffer, size_t buflen)
+{
+	if (write((uint8_t *)buffer)) {
+		return _meta->o_size;
+	}
+
+	return 0;
 }
 
 int
@@ -353,30 +364,19 @@ ssize_t
 uORB::DeviceNode::publish(const orb_metadata *meta, orb_advert_t handle, const void *data)
 {
 	uORB::DeviceNode *devnode = (uORB::DeviceNode *)handle;
-	int ret;
 
 	/* check if the device handle is initialized and data is valid */
-	if ((devnode == nullptr) || (meta == nullptr) || (data == nullptr)) {
-		errno = EFAULT;
+	if ((devnode == nullptr) || (meta == nullptr)) {
 		return PX4_ERROR;
 	}
 
 	/* check if the orb meta data matches the publication */
 	if (devnode->_meta != meta) {
-		errno = EINVAL;
 		return PX4_ERROR;
 	}
 
 	/* call the devnode write method with no file pointer */
-	ret = devnode->write(nullptr, (const char *)data, meta->o_size);
-
-	if (ret < 0) {
-		errno = -ret;
-		return PX4_ERROR;
-	}
-
-	if (ret != (int)meta->o_size) {
-		errno = EIO;
+	if (!devnode->write((uint8_t *)data)) {
 		return PX4_ERROR;
 	}
 
@@ -578,14 +578,7 @@ int16_t uORB::DeviceNode::process_received_message(int32_t length, uint8_t *data
 	}
 
 	/* call the devnode write method with no file pointer */
-	ret = write(nullptr, (const char *)data, _meta->o_size);
-
-	if (ret < 0) {
-		return PX4_ERROR;
-	}
-
-	if (ret != (int)_meta->o_size) {
-		errno = EIO;
+	if (!write(data)) {
 		return PX4_ERROR;
 	}
 
